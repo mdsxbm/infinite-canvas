@@ -25,6 +25,7 @@ import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-pa
 import { CanvasNodeContextMenu } from "@/components/canvas/canvas-context-menu";
 import { CanvasNodeAngleDialog, type CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
 import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
+import { CanvasVideoFrameExtractDialog } from "@/components/canvas/canvas-video-frame-extract-dialog";
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
@@ -235,6 +236,7 @@ function InfiniteCanvasPage() {
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
     const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
+    const [frameExtractNodeId, setFrameExtractNodeId] = useState<string | null>(null);
     const [titleEditing, setTitleEditing] = useState(false);
     const [titleDraft, setTitleDraft] = useState("");
     const [historyState, setHistoryState] = useState({ canUndo: false, canRedo: false });
@@ -588,6 +590,7 @@ function InfiniteCanvasPage() {
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
     const previewNode = previewNodeId ? nodeById.get(previewNodeId) || null : null;
+    const frameExtractNode = frameExtractNodeId ? nodeById.get(frameExtractNodeId) || null : null;
     const hasMultipleSelectedNodes = selectedNodeIds.size > 1;
     const activeNodeId = hasMultipleSelectedNodes ? null : hoveredNodeId || (selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null);
     const batchChildCountById = useMemo(() => {
@@ -753,6 +756,7 @@ function InfiniteCanvasPage() {
             setMaskEditNodeId((current) => (current && allIds.has(current) ? null : current));
             setAngleNodeId((current) => (current && allIds.has(current) ? null : current));
             setPreviewNodeId((current) => (current && allIds.has(current) ? null : current));
+            setFrameExtractNodeId((current) => (current && allIds.has(current) ? null : current));
             setRunningNodeId((current) => (current && allIds.has(current) ? null : current));
             setContextMenu((current) => (current?.type === "node" && allIds.has(current.nodeId) ? null : current));
             cleanupCanvasFiles({ projectId, nodes: nodesRef.current.filter((node) => !allIds.has(node.id)), chatSessions });
@@ -786,6 +790,7 @@ function InfiniteCanvasPage() {
         setMaskEditNodeId(null);
         setAngleNodeId(null);
         setPreviewNodeId(null);
+        setFrameExtractNodeId(null);
         setRunningNodeId(null);
         deselectCanvas();
         setClearConfirmOpen(false);
@@ -1640,6 +1645,63 @@ function InfiniteCanvasPage() {
             setContextMenu(null);
         },
         [effectiveConfig.model, effectiveConfig.textModel, message],
+    );
+
+    const generateVideoFromImageNode = useCallback(
+        (node: CanvasNodeData) => {
+            if (node.type !== CanvasNodeType.Image || !node.metadata?.content) {
+                message.warning("图片节点为空，无法生成视频");
+                return;
+            }
+            const videoSpec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
+            const centerY = node.position.y + node.height / 2;
+            const videoNode = createCanvasNode(
+                CanvasNodeType.Video,
+                { x: node.position.x + node.width + 96 + videoSpec.width / 2, y: centerY },
+                {
+                    model: effectiveConfig.videoModel || effectiveConfig.model,
+                    size: effectiveConfig.size,
+                    seconds: effectiveConfig.videoSeconds,
+                    vquality: effectiveConfig.vquality,
+                    generateAudio: effectiveConfig.videoGenerateAudio,
+                    watermark: effectiveConfig.videoWatermark,
+                },
+            );
+            setNodes((prev) => [...prev, videoNode]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: videoNode.id }]);
+            setSelectedNodeIds(new Set([videoNode.id]));
+            setSelectedConnectionId(null);
+            setDialogNodeId(videoNode.id);
+            setContextMenu(null);
+        },
+        [effectiveConfig.model, effectiveConfig.size, effectiveConfig.videoGenerateAudio, effectiveConfig.videoModel, effectiveConfig.videoSeconds, effectiveConfig.videoWatermark, effectiveConfig.vquality, message],
+    );
+
+    const extractVideoFrame = useCallback(
+        async (node: CanvasNodeData, dataUrl: string, timeMs: number) => {
+            if (!node.metadata?.content) return;
+            const image = await uploadImage(dataUrl);
+            const width = Math.min(node.width, Math.max(220, image.width));
+            const childId = nanoid();
+            const child: CanvasNodeData = {
+                id: childId,
+                type: CanvasNodeType.Image,
+                title: `帧 ${Math.round(timeMs / 1000)}s`,
+                position: { x: node.position.x + node.width + 96, y: node.position.y },
+                width,
+                height: width * (image.height / image.width),
+                metadata: {
+                    ...imageMetadata(image),
+                    prompt: `从视频 ${node.title || ""} 第 ${Math.round(timeMs / 1000)} 秒抽帧`,
+                },
+            };
+            setNodes((prev) => [...prev, child]);
+            setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+            setSelectedNodeIds(new Set([childId]));
+            setSelectedConnectionId(null);
+            setFrameExtractNodeId(null);
+        },
+        [],
     );
 
     const cropImageNode = useCallback(async (node: CanvasNodeData, crop: CanvasImageCropRect) => {
@@ -2876,6 +2938,8 @@ function InfiniteCanvasPage() {
                     onAngle={(node) => setAngleNodeId(node.id)}
                     onViewImage={(node) => setPreviewNodeId(node.id)}
                     onReversePrompt={createImageReversePromptNodes}
+                    onGenerateVideo={generateVideoFromImageNode}
+                    onExtractFrame={(node) => setFrameExtractNodeId(node.id)}
                     onRetry={(node) => void handleRetryNode(node)}
                     onToggleFreeResize={(node) => toggleNodeFreeResize(node.id)}
                     onDelete={(node) => deleteNodes(new Set([node.id]))}
@@ -2935,6 +2999,9 @@ function InfiniteCanvasPage() {
 
                 {cropNode?.metadata?.content ? <CanvasNodeCropDialog dataUrl={cropNode.metadata.content} open={Boolean(cropNode)} onClose={() => setCropNodeId(null)} onConfirm={(crop) => void cropImageNode(cropNode!, crop)} /> : null}
 
+                {frameExtractNode?.metadata?.content ? (
+                    <CanvasVideoFrameExtractDialog videoUrl={frameExtractNode.metadata.content} open={Boolean(frameExtractNode)} onClose={() => setFrameExtractNodeId(null)} onConfirm={(dataUrl, timeMs) => void extractVideoFrame(frameExtractNode!, dataUrl, timeMs)} />
+                ) : null}
                 {maskEditNode?.metadata?.content ? (
                     <CanvasNodeMaskEditDialog dataUrl={maskEditNode.metadata.content} open={Boolean(maskEditNode)} onClose={() => setMaskEditNodeId(null)} onConfirm={(payload) => void maskEditImageNode(maskEditNode!, payload)} />
                 ) : null}
